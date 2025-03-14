@@ -209,7 +209,7 @@ int main( int nargs, char* args[] )
         displayer->update( simu.vegetal_map(), simu.fire_map() );
         if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
             break;
-        std::this_thread::sleep_for(0.1s);
+        //std::this_thread::sleep_for(0.1s);
     }
     return EXIT_SUCCESS;
 }
