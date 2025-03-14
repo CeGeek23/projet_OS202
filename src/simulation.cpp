@@ -202,14 +202,33 @@ int main( int nargs, char* args[] )
     auto simu = Model( params.length, params.discretization, params.wind,
                        params.start);
     SDL_Event event;
+
+    // Vriables qui nous serviront pour les mesures de performances
+    auto start_time = std::chrono::high_resolution_clock::now();
+    auto total_start_time = start_time; // temps de début de la simulation
+    auto total_end_time = start_time; // temps de fin de la simulation
+    auto display_start_time = start_time; // enregistre le temps de début de l'affichage
+    auto display_end_time = start_time; // enregistre le temps de fin de l'affichage
+
     while (simu.update())
     {
-        if ((simu.time_step() & 31) == 0) 
+        if ((simu.time_step() & 31) == 0)
             std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
-        displayer->update( simu.vegetal_map(), simu.fire_map() );
+        
+        display_start_time = std::chrono::high_resolution_clock::now();
+        displayer->update(simu.vegetal_map(), simu.fire_map());
+        display_end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> display_duration = display_end_time - display_start_time;
+        std::cout << "Durée de l'affichage: " << display_duration.count() << " seconds" << std::endl;
+
         if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
             break;
         std::this_thread::sleep_for(0.1s);
     }
+
+    total_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> total_duration = total_end_time - total_start_time;
+    std::cout << "Total simulation time: " << total_duration.count() << " seconds" << std::endl;
+
     return EXIT_SUCCESS;
 }
