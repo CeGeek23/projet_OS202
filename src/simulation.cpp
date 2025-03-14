@@ -197,15 +197,23 @@ void display_params(ParamsType const& params)
         << "\tPosition initiale du foyer (col, ligne) : " << params.start.column << ", " << params.start.row << std::endl;
 }
 
-void compute_load_distribution(int discretization, int globSize, std::vector<int>& recvcounts, std::vector<int>& displs)
-{
-    int rows_per_proc = discretization / (globSize - 1);
-    int extra_rows = discretization % (globSize - 1);
 
-    for (int i = 0; i < globSize - 1; ++i) {
+void compute_load_distribution(int discretization, int globSize, std::vector<int>& recvcounts, std::vector<int>& displs) {
+    int num_procs = globSize - 1; // Nombre de processus effectifs (hors processus maître)
+    int rows_per_proc = discretization / num_procs;
+    int extra_rows = discretization % num_procs;
+
+    // Redimensionner les vecteurs pour éviter des erreurs
+    recvcounts.resize(num_procs);
+    displs.resize(num_procs);
+
+    for (int i = 0; i < num_procs; ++i) {
+        // Distribuer les lignes uniformément et ajouter une ligne en plus aux `extra_rows` premiers processus
         int num_rows = rows_per_proc + (i < extra_rows ? 1 : 0);
         recvcounts[i] = num_rows * discretization;
-        displs[i] = (i > 0 ? displs[i - 1] + recvcounts[i - 1] : 0);
+
+        // Calculer le déplacement (offset) pour chaque processus
+        displs[i] = (i == 0) ? 0 : displs[i - 1] + recvcounts[i - 1];
     }
 }
 
@@ -224,6 +232,10 @@ int main(int nargs, char* args[])
         return EXIT_FAILURE;
     }
 
+    // Diviser les processus en deux groupes : un pour le maître et un pour les travailleurs
+    int color = (globRank == 0) ? 0 : 1;
+    MPI_Comm local_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, color, globRank, &local_comm);
     auto params = parse_arguments(nargs - 1, &args[1]);
 
     if (!check_params(params)) {
@@ -258,12 +270,7 @@ int main(int nargs, char* args[])
         }
 
         bool running = true;
-
-        // variables pour mesurer les performances
         auto total_start_time = std::chrono::high_resolution_clock::now();
-        auto total_end_time = total_start_time;
-        auto display_start_time = total_start_time;
-        auto display_end_time = display_start_time;
 
         while (running)
         {
@@ -285,10 +292,10 @@ int main(int nargs, char* args[])
             }
 
             // On mesure le temps d'affichage
-            display_start_time = std::chrono::high_resolution_clock::now();
+            auto display_start_time = std::chrono::high_resolution_clock::now();
             // On met l'affichage à jour avec l'état reçu
             displayer->update(vegetation, fire);
-            display_end_time = std::chrono::high_resolution_clock::now();
+            auto display_end_time = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double> display_duration = display_end_time - display_start_time;
             std::cout << "Temps d'affichage : " << display_duration.count() << " seconds" << std::endl;
 
@@ -308,15 +315,14 @@ int main(int nargs, char* args[])
             //std::this_thread::sleep_for(0.1s);
         }
 
-        total_end_time = std::chrono::high_resolution_clock::now();
+        auto total_end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> total_duration = total_end_time - total_start_time;
         std::cout << "Temps total de simulation : " << total_duration.count() << " seconds" << std::endl;
     }
 
     else
     {
-        auto simu = Model(params.length, params.discretization, params.wind,
-            params.start);
+        auto simu = Model(params.length, params.discretization, params.wind, params.start);
         double local_time = 0.0;
         int local_iter = 0;
         bool computing = true;
@@ -327,6 +333,10 @@ int main(int nargs, char* args[])
         MPI_Irecv(&term_signal, 1, MPI_INT, 0, 200, MPI_COMM_WORLD, &termReq);
 
         // Diviser la grille entre les processus
+        std::vector<int> recvcounts(globSize - 1);
+        std::vector<int> displs(globSize - 1);
+        compute_load_distribution(params.discretization, globSize, recvcounts, displs);
+
         int start_row = (globRank - 1) * recvcounts[globRank - 1] / params.discretization;
         int num_rows = recvcounts[globRank - 1] / params.discretization;
         int local_grid_size = num_rows * params.discretization;
