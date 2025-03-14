@@ -199,10 +199,9 @@ void display_params(ParamsType const& params)
 
 
 void compute_load_distribution(int discretization, int globSize, std::vector<int>& recvcounts, std::vector<int>& displs) {
-    int num_procs = globSize - 1; // Nombre de processus effectifs (hors processus maître)
+    int num_procs = globSize - 1; 
     int rows_per_proc = discretization / num_procs;
     int extra_rows = discretization % num_procs;
-
     // Redimensionner les vecteurs pour éviter des erreurs
     recvcounts.resize(num_procs);
     displs.resize(num_procs);
@@ -232,12 +231,11 @@ int main(int nargs, char* args[])
         return EXIT_FAILURE;
     }
 
-    // Diviser les processus en deux groupes : un pour le maître et un pour les travailleurs
+    // Diviser les processus en deux groupes : un pour le maître et un pour les workers
     int color = (globRank == 0) ? 0 : 1;
     MPI_Comm local_comm;
     MPI_Comm_split(MPI_COMM_WORLD, color, globRank, &local_comm);
     auto params = parse_arguments(nargs - 1, &args[1]);
-
     if (!check_params(params)) {
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE); // on termine MPI si les paramètres sont incorrects
         return EXIT_FAILURE;
@@ -322,84 +320,115 @@ int main(int nargs, char* args[])
 
     else
     {
-        auto simu = Model(params.length, params.discretization, params.wind, params.start);
-        double local_time = 0.0;
-        int local_iter = 0;
-        bool computing = true;
+        int local_rank, local_size;
+        MPI_Comm_rank(local_comm, &local_rank);
+        MPI_Comm_size(local_comm, &local_size);
+        int num_workers = local_size; // égale à globSize - 1
+        int rows_per_proc = params.discretization / num_workers;
+        int extra_rows = params.discretization % num_workers;
+        int local_num_rows = rows_per_proc + (local_rank < extra_rows ? 1 : 0);
+        int num_cols = params.discretization;
 
-        // On se prépare à une réception non bloquante pour détecter un signal de terminaison envoyé par le processus 0
+        // Allocation des grilles locales avec 2 lignes ghost (en haut et en bas)
+        std::vector<std::uint8_t> local_vegetation((local_num_rows + 2) * num_cols, 0);
+        std::vector<std::uint8_t> local_fire((local_num_rows + 2) * num_cols, 0);
+
+        // Pour initialiser, on utilise le modèle global pour récupérer la portion correspondante
+        auto simu = Model(params.length, params.discretization, params.wind, params.start);
+        int global_start_row = 0;
+        for (int i = 0; i < local_rank; ++i) {
+            global_start_row += rows_per_proc + (i < extra_rows ? 1 : 0);
+        }
+        auto global_vegetation = simu.vegetal_map();
+        auto global_fire = simu.fire_map();
+
+        for(int i = 0; i < local_num_rows; ++i) {
+            int global_idx = (global_start_row + i) * num_cols;
+            std::copy(global_vegetation.begin() + global_idx, global_vegetation.begin() + global_idx + num_cols, local_vegetation.begin() + (i + 1) * num_cols);
+            std::copy(global_fire.begin() + global_idx, global_fire.begin() + global_idx + num_cols, local_fire.begin() + (i + 1) * num_cols);
+        
+        }
+
+        // Fonctions lambda pour l'échange des ghost cells sur le communicateur local
+        auto update_ghost_cells = [&](std::vector<std::uint8_t>& grid, int tag_recv, int tag_send) {
+            int top_neighbor = (local_rank - 1 + num_workers) % num_workers;
+            int bottom_neighbor = (local_rank + 1) % num_workers;
+            MPI_Request req_top, req_bottom;
+            // Échange avec le voisin du haut
+            MPI_Irecv(grid.data(), num_cols, MPI_UINT8_T, top_neighbor, tag_recv, local_comm, &req_top);
+            MPI_Send(grid.data() + num_cols, num_cols, MPI_UINT8_T, top_neighbor, tag_send, local_comm);
+            // Échange avec le voisin du bas
+            MPI_Irecv(grid.data() + (local_num_rows + 1)*num_cols, num_cols, MPI_UINT8_T, bottom_neighbor, tag_send, local_comm, &req_bottom);
+            MPI_Send(grid.data() + local_num_rows * num_cols, num_cols, MPI_UINT8_T, bottom_neighbor, tag_recv, local_comm);
+            MPI_Wait(&req_top, MPI_STATUS_IGNORE);
+            MPI_Wait(&req_bottom, MPI_STATUS_IGNORE);
+        };
+
+        auto update_ghost_cells_vegetation = [&](std::vector<std::uint8_t>& grid) {
+            update_ghost_cells(grid, 300, 301);
+        };
+        auto update_ghost_cells_fire = [&](std::vector<std::uint8_t>& grid) {
+            update_ghost_cells(grid, 302, 303);
+        };
+        // Préparation de la détection de terminaison
         int term_signal = 0;
         MPI_Request termReq;
         MPI_Irecv(&term_signal, 1, MPI_INT, 0, 200, MPI_COMM_WORLD, &termReq);
 
-        // Diviser la grille entre les processus
-        std::vector<int> recvcounts(globSize - 1);
-        std::vector<int> displs(globSize - 1);
-        compute_load_distribution(params.discretization, globSize, recvcounts, displs);
+        bool computing = true;
+        double local_time = 0.0;
+        int local_iter = 0;
 
-        int start_row = (globRank - 1) * recvcounts[globRank - 1] / params.discretization;
-        int num_rows = recvcounts[globRank - 1] / params.discretization;
-        int local_grid_size = num_rows * params.discretization;
-
-        // Allocation des buffers locaux pour les cartes de végétation et de feu
-        std::vector<std::uint8_t> local_vegetation(local_grid_size, 0);
-        std::vector<std::uint8_t> local_fire(local_grid_size, 0);
-
-        while (simu.update() & computing)
+        while (computing)
         {
             auto iter_start = std::chrono::steady_clock::now();
-            // Calcul de la prochaine itération
+            // Mise à jour des ghost cells
+            update_ghost_cells_vegetation(local_vegetation);
+            update_ghost_cells_fire(local_fire);
+
+            // Ici, tu effectuerais le calcul de la prochaine itération en t'appuyant sur les données
+            // locales (les cellules intérieures et les ghost cells). Pour cet exemple, nous mettons à jour
+            // le modèle global et recopions la portion correspondante.
             simu.update();
+            global_vegetation = simu.vegetal_map();
+            global_fire = simu.fire_map();
+            for (int i = 0; i < local_num_rows; ++i) {
+                int global_idx = (global_start_row + i) * num_cols;
+                std::copy(global_vegetation.begin() + global_idx, global_vegetation.begin() + global_idx + num_cols,
+                          local_vegetation.begin() + (i+1)*num_cols);
+                std::copy(global_fire.begin() + global_idx, global_fire.begin() + global_idx + num_cols,
+                          local_fire.begin() + (i+1)*num_cols);
+            }
+
             auto iter_end = std::chrono::steady_clock::now();
             double dt = std::chrono::duration<double>(iter_end - iter_start).count();
             local_time += dt;
             local_iter++;
 
-            if ((simu.time_step() & 31) == 0) {
-                std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
-            }
-
-            // Récupération des cartes de végétation et de feu
-            auto vegetation = simu.vegetal_map(); // Assuming vegetal_map() returns a vector
-            auto fire = simu.fire_map(); // Assuming fire_map() returns a vector
-
-            // Copie des données locales dans les buffers locaux
-            std::copy(vegetation.begin() + start_row * params.discretization, vegetation.begin() + (start_row + num_rows) * params.discretization, local_vegetation.begin());
-            std::copy(fire.begin() + start_row * params.discretization, fire.begin() + (start_row + num_rows) * params.discretization, local_fire.begin());
-
-            // vérification non bloquante du signal de terminaison
             int flag = 0;
             MPI_Status status;
             MPI_Test(&termReq, &flag, &status);
-            if (flag && term_signal == -1)
-            {
+            if (flag && term_signal == -1) {
                 computing = false;
                 break;
             }
 
-            // Envoi non bloquant de l'état de simulation vers l'affichage
+            // Envoi de la portion intérieure (sans ghost cells) vers le maître
             MPI_Request sendReq;
-            MPI_Isend(local_vegetation.data(), local_grid_size, MPI_UINT8_T, 0, 100, MPI_COMM_WORLD, &sendReq);
-            MPI_Request_free(&sendReq); // On libère la requête
+            MPI_Isend(local_vegetation.data() + num_cols, local_num_rows * num_cols, MPI_UINT8_T, 0, 100, MPI_COMM_WORLD, &sendReq);
+            MPI_Request_free(&sendReq);
             MPI_Request sendReqFire;
-            MPI_Isend(local_fire.data(), local_grid_size, MPI_UINT8_T, 0, 101, MPI_COMM_WORLD, &sendReqFire);
-            MPI_Request_free(&sendReqFire); // On libère la requête
-
-            //std::this_thread::sleep_for(0.1s);
+            MPI_Isend(local_fire.data() + num_cols, local_num_rows * num_cols, MPI_UINT8_T, 0, 101, MPI_COMM_WORLD, &sendReqFire);
+            MPI_Request_free(&sendReqFire);
         }
 
-        // Réduction des temps de calculs locaux pour obtenir une statistique globale
         double global_total_time = 0.0;
         int global_total_iter = 0;
         MPI_Reduce(&local_time, &global_total_time, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(&local_iter, &global_total_iter, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-
-        if (globRank == 1 && global_total_iter > 0)
-        {
-            std::cout << "Temps de calcul moyen par itération : "
-                << global_total_time / global_total_iter << "s" << std::endl;
+        if (globRank == 1 && global_total_iter > 0) {
+            std::cout << "Temps de calcul moyen par itération : " << global_total_time / global_total_iter << "s" << std::endl;
         }
-
     }
 
     MPI_Finalize();
