@@ -1,7 +1,6 @@
 include Make_linux.inc
-#include Make_msys2.inc
-#include Make_osx.inc
 
+CXX = mpic++  # On rajoute mpic++ pour compiler avec MPI
 CXXFLAGS = -std=c++17
 ifdef DEBUG
 CXXFLAGS += -g -O0 -Wall -fbounds-check -pedantic -D_GLIBCXX_DEBUG
@@ -11,9 +10,12 @@ CXXFLAGS2 = ${CXXFLAGS} -O2 -march=native -Wall
 CXXFLAGS += -O3 -march=native -Wall
 endif
 
-ALL= simulation.exe 
+# chemin d'inclusion pour mpi.h
+CXXFLAGS += -I/usr/lib/x86_64-linux-gnu/openmpi/include
 
-default:	help
+ALL = simulation.exe 
+
+default: help
 
 all: $(ALL)
 
@@ -21,7 +23,7 @@ clean:
 	@rm -fr *.o *.exe *~
 
 .cpp.o:
-	$(CXX) $(CXXFLAGS2) -c $^ -o $@	
+	$(CXX) $(CXXFLAGS2) -c $< -o $@  # Correction: $< pour le fichier source
 
 simulation.exe : display.o display.hpp model.o model.hpp simulation.o
 	$(CXX) $(CXXFLAGS2) $^ -o $@ $(LIB)	

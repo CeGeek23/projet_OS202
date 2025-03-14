@@ -31,6 +31,7 @@ public:
     std::vector<std::uint8_t> vegetal_map() const { return m_vegetation_map; }
     std::vector<std::uint8_t> fire_map() const { return m_fire_map; }
     std::size_t time_step() const { return m_time_step; }
+    const std::unordered_map<std::size_t, std::uint8_t>& fire_front() const { return m_fire_front; }
 
 private:
     std::size_t   get_index_from_lexicographic_indices( LexicoIndices t_lexico_indices  ) const;

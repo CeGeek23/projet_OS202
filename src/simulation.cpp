@@ -4,9 +4,14 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <array>
+#include <vector>
+#include <numeric>
 
 #include "model.hpp"
 #include "display.hpp"
+
+#include <mpi.h>
 
 using namespace std::string_literals;
 using namespace std::chrono_literals;
@@ -194,22 +199,181 @@ void display_params(ParamsType const& params)
 
 int main( int nargs, char* args[] )
 {
-    auto params = parse_arguments(nargs-1, &args[1]);
-    display_params(params);
-    if (!check_params(params)) return EXIT_FAILURE;
+    // On initialise MPI via MPI_Init
+    MPI_Init(&nargs, &args);
+    int globRank, globSize;
+    MPI_Comm_rank(MPI_COMM_WORLD, &globRank);
+    MPI_Comm_size(MPI_COMM_WORLD, &globSize);
 
-    auto displayer = Displayer::init_instance( params.discretization, params.discretization );
-    auto simu = Model( params.length, params.discretization, params.wind,
-                       params.start);
-    SDL_Event event;
-    while (simu.update())
+    if(globSize < 2)
     {
-        if ((simu.time_step() & 31) == 0) 
-            std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
-        displayer->update( simu.vegetal_map(), simu.fire_map() );
-        if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
-            break;
-        std::this_thread::sleep_for(0.1s);
+        std::cerr << "Cette simulation nécessite au moins 2 processus MPI" << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE); // Abort permet de terminer MPI proprement en cas d'erreur
+        return EXIT_FAILURE;
     }
+
+    auto params = parse_arguments(nargs-1, &args[1]);
+
+    if (!check_params(params)){
+        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE); // on termine MPI si les paramètres sont incorrects
+        return EXIT_FAILURE;
+    }
+
+    // Taille totale de l'espace de simulation
+    const int gridSize = params.discretization * params.discretization;
+
+    if(globRank == 0)
+    {
+        display_params(params);
+        // On initialise l'affichage via SDL grâce à Displayer::init_instance
+        auto displayer = Displayer::init_instance( params.discretization, params.discretization );
+
+        // On alloue les buffers pour l'état de la simulation
+        std::vector<std::uint8_t> vegetation(gridSize, 0);
+        std::vector<std::uint8_t> fire(gridSize, 0);
+
+        // Réception non bloquantes depuis les processus de calcul
+        std::vector<MPI_Request> recvReqVeget(globSize - 1);
+        std::vector<MPI_Request> recvReqFire(globSize - 1);
+        std::vector<int> recvcounts(globSize - 1);
+        std::vector<int> displs(globSize - 1);
+
+        int rows_per_proc = params.discretization / (globSize - 1);
+        int extra_rows = params.discretization % (globSize - 1);
+
+        for (int i = 0; i < globSize - 1; ++i) {
+            int num_rows = rows_per_proc + (i < extra_rows ? 1 : 0);
+            recvcounts[i] = num_rows * params.discretization;
+            displs[i] = (i > 0 ? displs[i-1] + recvcounts[i-1] : 0);
+        }
+
+        for (int i = 1; i < globSize; ++i) {
+            MPI_Irecv(vegetation.data() + displs[i - 1], recvcounts[i - 1], MPI_UINT8_T, i, 100, MPI_COMM_WORLD, &recvReqVeget[i - 1]);
+            MPI_Irecv(fire.data() + displs[i - 1], recvcounts[i - 1], MPI_UINT8_T, i, 101, MPI_COMM_WORLD, &recvReqFire[i - 1]);
+        }
+
+        bool running = true;
+
+        while(running)
+        {
+            int flagVeget = 0, flagFire = 0;
+            MPI_Status status;
+            for (int i = 1; i < globSize; ++i) {
+                MPI_Test(&recvReqVeget[i - 1], &flagVeget, &status);
+                if(flagVeget)
+                {
+                    // Repost pour la prochaine mise à jour
+                    MPI_Irecv(vegetation.data() + displs[i - 1], recvcounts[i - 1], MPI_UINT8_T, i, 100, MPI_COMM_WORLD, &recvReqVeget[i - 1]);
+                }
+
+                MPI_Test(&recvReqFire[i - 1], &flagFire, &status);
+                if(flagFire)
+                {
+                    MPI_Irecv(fire.data() + displs[i - 1], recvcounts[i - 1], MPI_UINT8_T, i, 101, MPI_COMM_WORLD, &recvReqFire[i - 1]);
+                }
+            }
+
+            // On met l'affichage à jour avec l'état reçu
+            displayer->update(vegetation, fire);
+            
+            SDL_Event event;
+            while (SDL_PollEvent(&event))
+            {
+                if (event.type == SDL_QUIT)
+                {
+                    running = false;
+                    int term = -1;
+                    for (int i = 1; i < globSize; ++i) {
+                        MPI_Send(&term, 1, MPI_INT, i, 200, MPI_COMM_WORLD); // On envoie un message de terminaison à tous les processus
+                    }
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(0.1s);
+        }
+    }
+
+    else
+    {
+        auto simu = Model( params.length, params.discretization, params.wind,
+            params.start);
+        double local_time = 0.0;
+        int local_iter = 0;
+        bool computing = true;
+
+        // On se prépare à une réception non bloquante pour détecter un signal de terminaison envoyé par le processus 0
+        int term_signal = 0;
+        MPI_Request termReq;
+        MPI_Irecv(&term_signal, 1, MPI_INT, 0, 200, MPI_COMM_WORLD, &termReq);
+
+        // Diviser la grille entre les processus
+        int rows_per_proc = params.discretization / (globSize - 1);
+        int extra_rows = params.discretization % (globSize - 1);
+        int start_row = (globRank - 1) * rows_per_proc + std::min(globRank - 1, extra_rows);
+        int num_rows = rows_per_proc + (globRank <= extra_rows ? 1 : 0);
+        int local_grid_size = num_rows * params.discretization;
+
+        // Allocation des buffers locaux pour les cartes de végétation et de feu
+        std::vector<std::uint8_t> local_vegetation(local_grid_size, 0);
+        std::vector<std::uint8_t> local_fire(local_grid_size, 0);
+
+        while (simu.update() & computing)
+        {
+            auto iter_start = std::chrono::steady_clock::now();
+            // Calcul de la prochaine itération
+            simu.update();
+            auto iter_end = std::chrono::steady_clock::now();
+            double dt = std::chrono::duration<double>(iter_end - iter_start).count();
+            local_time += dt;
+            local_iter++;
+            
+            if ((simu.time_step() & 31) == 0) {
+                std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
+            }
+
+            // Récupération des cartes de végétation et de feu
+            auto vegetation = simu.vegetal_map(); // Assuming vegetal_map() returns a vector
+            auto fire = simu.fire_map(); // Assuming fire_map() returns a vector
+
+            // Copie des données locales dans les buffers locaux
+            std::copy(vegetation.begin() + start_row * params.discretization, vegetation.begin() + (start_row + num_rows) * params.discretization, local_vegetation.begin());
+            std::copy(fire.begin() + start_row * params.discretization, fire.begin() + (start_row + num_rows) * params.discretization, local_fire.begin());
+
+            // vérification non bloquante du signal de terminaison
+            int flag = 0;
+            MPI_Status status;
+            MPI_Test(&termReq, &flag, &status);
+            if(flag && term_signal == -1)
+            {
+                computing = false;
+                break;
+            }
+
+            // Envoi non bloquant de l'état de simulation vers l'affichage
+            MPI_Request sendReq;
+            MPI_Isend(local_vegetation.data(), local_grid_size, MPI_UINT8_T, 0, 100, MPI_COMM_WORLD, &sendReq);
+            MPI_Request_free(&sendReq); // On libère la requête
+            MPI_Request sendReqFire;
+            MPI_Isend(local_fire.data(), local_grid_size, MPI_UINT8_T, 0, 101, MPI_COMM_WORLD, &sendReqFire);
+            MPI_Request_free(&sendReqFire); // On libère la requête
+
+            std::this_thread::sleep_for(0.1s);
+        }
+
+        // Réduction des temps de calculs locaux pour obtenir une statistique globale
+        double global_total_time = 0.0;
+        int global_total_iter = 0;
+        MPI_Reduce(&local_time, &global_total_time, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_iter, &global_total_iter, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+        if(globRank == 1 && global_total_iter > 0)
+        {
+            std::cout << "Temps de calcul moyen par itération : " 
+                      << global_total_time / global_total_iter << "s" << std::endl;
+        }
+        
+    }    
+
+    MPI_Finalize();
     return EXIT_SUCCESS;
 }
