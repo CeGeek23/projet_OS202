@@ -202,16 +202,16 @@ void compute_load_distribution(int discretization, int globSize, std::vector<int
     int num_procs = globSize - 1; 
     int rows_per_proc = discretization / num_procs;
     int extra_rows = discretization % num_procs;
-    // Redimensionner les vecteurs pour éviter des erreurs
+    // On redimensionne les vecteurs pour éviter des erreurs
     recvcounts.resize(num_procs);
     displs.resize(num_procs);
 
     for (int i = 0; i < num_procs; ++i) {
-        // Distribuer les lignes uniformément et ajouter une ligne en plus aux `extra_rows` premiers processus
+        // On distribue les lignes uniformément
         int num_rows = rows_per_proc + (i < extra_rows ? 1 : 0);
         recvcounts[i] = num_rows * discretization;
 
-        // Calculer le déplacement (offset) pour chaque processus
+        // on calcule le déplacement (offset) pour chaque processus
         displs[i] = (i == 0) ? 0 : displs[i - 1] + recvcounts[i - 1];
     }
 }
@@ -231,7 +231,7 @@ int main(int nargs, char* args[])
         return EXIT_FAILURE;
     }
 
-    // Diviser les processus en deux groupes : un pour le maître et un pour les workers
+    // on divise les processus en deux groupes : un pour le maître et un pour les workers
     int color = (globRank == 0) ? 0 : 1;
     MPI_Comm local_comm;
     MPI_Comm_split(MPI_COMM_WORLD, color, globRank, &local_comm);
@@ -333,7 +333,7 @@ int main(int nargs, char* args[])
         std::vector<std::uint8_t> local_vegetation((local_num_rows + 2) * num_cols, 0);
         std::vector<std::uint8_t> local_fire((local_num_rows + 2) * num_cols, 0);
 
-        // Pour initialiser, on utilise le modèle global pour récupérer la portion correspondante
+        // on utilise le modèle global pour récupérer la portion correspondante
         auto simu = Model(params.length, params.discretization, params.wind, params.start);
         int global_start_row = 0;
         for (int i = 0; i < local_rank; ++i) {
@@ -385,10 +385,7 @@ int main(int nargs, char* args[])
             // Mise à jour des ghost cells
             update_ghost_cells_vegetation(local_vegetation);
             update_ghost_cells_fire(local_fire);
-
-            // Ici, tu effectuerais le calcul de la prochaine itération en t'appuyant sur les données
-            // locales (les cellules intérieures et les ghost cells). Pour cet exemple, nous mettons à jour
-            // le modèle global et recopions la portion correspondante.
+            // Mise à jour de la simulation
             simu.update();
             global_vegetation = simu.vegetal_map();
             global_fire = simu.fire_map();
