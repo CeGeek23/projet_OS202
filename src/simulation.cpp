@@ -4,6 +4,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <mpi.h>
 
 #include "model.hpp"
 #include "display.hpp"
@@ -194,11 +195,22 @@ void display_params(ParamsType const& params)
 
 int main( int nargs, char* args[] )
 {
-    auto params = parse_arguments(nargs-1, &args[1]);
-    display_params(params);
-    if (!check_params(params)) return EXIT_FAILURE;
+    MPI_Init(&nargs, &args);
 
-    auto displayer = Displayer::init_instance(params.discretization, params.discretization);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    auto params = parse_arguments(nargs-1, &args[1]);
+    if (rank == 0) {
+        display_params(params);
+    }
+    if (!check_params(params)) {
+        MPI_Finalize();
+        return EXIT_FAILURE;
+    }
+
+    auto displayer = (rank == 0) ? Displayer::init_instance(params.discretization, params.discretization) : nullptr;
     auto simu = Model(params.length, params.discretization, params.wind, params.start);
     SDL_Event event;
 
@@ -213,29 +225,38 @@ int main( int nargs, char* args[] )
         bool continue_simulation = simu.update();
         auto update_end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> update_duration = update_end_time - update_start_time;
-        std::cout << "Update duration for one step: " << update_duration.count() << " seconds" << std::endl;
+        if (rank == 0) {
+            std::cout << "Update duration for one step: " << update_duration.count() << " seconds" << std::endl;
+        }
 
         if (!continue_simulation)
             break;
 
-        if ((simu.time_step() & 31) == 0) {
-            std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
+        if (rank == 0) {
+            if ((simu.time_step() & 31) == 0) {
+                std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
+            }
+
+            display_start_time = std::chrono::high_resolution_clock::now();
+            displayer->update(simu.vegetal_map(), simu.fire_map());
+            display_end_time = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> display_duration = display_end_time - display_start_time;
+            std::cout << "Display duration for one step: " << display_duration.count() << " seconds" << std::endl;
+
+            if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
+                break;
         }
 
-        display_start_time = std::chrono::high_resolution_clock::now();
-        displayer->update(simu.vegetal_map(), simu.fire_map());
-        display_end_time = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> display_duration = display_end_time - display_start_time;
-        std::cout << "Display duration for one step: " << display_duration.count() << " seconds" << std::endl;
-
-        if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
-            break;
-        //std::this_thread::sleep_for(0.1s);
+        // Synchronize all processes
+        MPI_Barrier(MPI_COMM_WORLD);
     }
 
     total_end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> total_duration = total_end_time - total_start_time;
-    std::cout << "Total simulation time: " << total_duration.count() << " seconds" << std::endl;
+    if (rank == 0) {
+        std::cout << "Total simulation time: " << total_duration.count() << " seconds" << std::endl;
+    }
 
+    MPI_Finalize();
     return EXIT_SUCCESS;
 }
