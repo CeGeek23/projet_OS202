@@ -4,7 +4,6 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
-#include <omp.h>
 
 #include "model.hpp"
 #include "display.hpp"
@@ -199,34 +198,44 @@ int main( int nargs, char* args[] )
     display_params(params);
     if (!check_params(params)) return EXIT_FAILURE;
 
-    auto displayer = Displayer::init_instance( params.discretization, params.discretization );
-    auto simu = Model( params.length, params.discretization, params.wind,
-                       params.start);
+    auto displayer = Displayer::init_instance(params.discretization, params.discretization);
+    auto simu = Model(params.length, params.discretization, params.wind, params.start);
     SDL_Event event;
 
-    std::thread display_thread([&]() {
-        while (true) {
-            displayer->update( simu.vegetal_map(), simu.fire_map() );
-            if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
-                break;
-            std::this_thread::sleep_for(0.1s);
-        }
-    });
+    // Variables qui nous serviront pour les mesures de performances
+    auto start_time = std::chrono::high_resolution_clock::now();
+    auto total_start_time = start_time, total_end_time = start_time;
+    auto display_start_time = start_time, display_end_time = start_time;
 
-    double start_time = omp_get_wtime();
-    while (simu.update())
+    while (true)
     {
-        if ((simu.time_step() & 31) == 0) 
+        auto update_start_time = std::chrono::high_resolution_clock::now();
+        bool continue_simulation = simu.update();
+        auto update_end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> update_duration = update_end_time - update_start_time;
+        std::cout << "Update duration for one step: " << update_duration.count() << " seconds" << std::endl;
+
+        if (!continue_simulation)
+            break;
+
+        if ((simu.time_step() & 31) == 0) {
             std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
-        displayer->update( simu.vegetal_map(), simu.fire_map() );
+        }
+
+        display_start_time = std::chrono::high_resolution_clock::now();
+        displayer->update(simu.vegetal_map(), simu.fire_map());
+        display_end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> display_duration = display_end_time - display_start_time;
+        std::cout << "Display duration for one step: " << display_duration.count() << " seconds" << std::endl;
+
         if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
             break;
         //std::this_thread::sleep_for(0.1s);
     }
-    double end_time = omp_get_wtime();
-    double elapsed_time = end_time - start_time;
-    std::cout << "Simulation terminée en " << elapsed_time << " secondes" << std::endl;
 
-    display_thread.join();
+    total_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> total_duration = total_end_time - total_start_time;
+    std::cout << "Total simulation time: " << total_duration.count() << " seconds" << std::endl;
+
     return EXIT_SUCCESS;
 }
