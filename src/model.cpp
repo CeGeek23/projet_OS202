@@ -95,7 +95,7 @@ Model::update()
                 double tirage = pseudo_random(f.first + m_time_step, m_time_step);
                 double green_power = m_vegetation_map[f.first + m_geometry];
                 double correction = power * log_factor(green_power);
-                if (tirage < 2 * alphaSouthNorth * p1 * correction) // Тестуємо збільшене p1
+                if (tirage < 2 * alphaSouthNorth * p1 * correction) // Test increased p1
                 {
                     m_fire_map[f.first + m_geometry] = 255.;
                     next_front[f.first + m_geometry] = 255.;
@@ -124,7 +124,7 @@ Model::update()
                 double tirage = pseudo_random(f + m_time_step, m_time_step);
                 double green_power = m_vegetation_map[f + m_geometry];
                 double correction = power * log_factor(green_power);
-                if (tirage < 2 * alphaSouthNorth * p1 * correction) // Тестуємо збільшене p1
+                if (tirage < 2 * alphaSouthNorth * p1 * correction) // Test increased p1
                 {
                     #pragma omp critical
                     {

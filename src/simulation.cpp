@@ -4,6 +4,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <omp.h>
 
 #include "model.hpp"
 #include "display.hpp"
@@ -202,6 +203,17 @@ int main( int nargs, char* args[] )
     auto simu = Model( params.length, params.discretization, params.wind,
                        params.start);
     SDL_Event event;
+
+    std::thread display_thread([&]() {
+        while (true) {
+            displayer->update( simu.vegetal_map(), simu.fire_map() );
+            if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
+                break;
+            std::this_thread::sleep_for(0.1s);
+        }
+    });
+
+    double start_time = omp_get_wtime();
     while (simu.update())
     {
         if ((simu.time_step() & 31) == 0) 
@@ -211,5 +223,10 @@ int main( int nargs, char* args[] )
             break;
         //std::this_thread::sleep_for(0.1s);
     }
+    double end_time = omp_get_wtime();
+    double elapsed_time = end_time - start_time;
+    std::cout << "Simulation terminée en " << elapsed_time << " secondes" << std::endl;
+
+    display_thread.join();
     return EXIT_SUCCESS;
 }
