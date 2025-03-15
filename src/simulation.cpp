@@ -198,28 +198,34 @@ int main( int nargs, char* args[] )
     display_params(params);
     if (!check_params(params)) return EXIT_FAILURE;
 
-    auto displayer = Displayer::init_instance( params.discretization, params.discretization );
-    auto simu = Model( params.length, params.discretization, params.wind,
-                       params.start);
+    auto displayer = Displayer::init_instance(params.discretization, params.discretization);
+    auto simu = Model(params.length, params.discretization, params.wind, params.start);
     SDL_Event event;
 
-    // Vriables qui nous serviront pour les mesures de performances
+    // Variables qui nous serviront pour les mesures de performances
     auto start_time = std::chrono::high_resolution_clock::now();
-    auto total_start_time = start_time; // temps de début de la simulation
-    auto total_end_time = start_time; // temps de fin de la simulation
-    auto display_start_time = start_time; // enregistre le temps de début de l'affichage
-    auto display_end_time = start_time; // enregistre le temps de fin de l'affichage
+    auto total_start_time = start_time, total_end_time = start_time;
+    auto display_start_time = start_time, display_end_time = start_time;
 
-    while (simu.update())
+    while (true)
     {
+        auto update_start_time = std::chrono::high_resolution_clock::now();
+        bool continue_simulation = simu.update();
+        auto update_end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> update_duration = update_end_time - update_start_time;
+        std::cout << "Update duration for one step: " << update_duration.count() << " seconds" << std::endl;
+
+        if (!continue_simulation)
+            break;
+
         if ((simu.time_step() & 31) == 0)
             std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
-        
+
         display_start_time = std::chrono::high_resolution_clock::now();
         displayer->update(simu.vegetal_map(), simu.fire_map());
         display_end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> display_duration = display_end_time - display_start_time;
-        std::cout << "Durée de l'affichage: " << display_duration.count() << " seconds" << std::endl;
+        std::cout << "Display duration for one step: " << display_duration.count() << " seconds" << std::endl;
 
         if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
             break;
