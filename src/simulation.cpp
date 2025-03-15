@@ -192,6 +192,7 @@ void display_params(ParamsType const& params)
               << "\tVecteur vitesse : [" << params.wind[0] << ", " << params.wind[1] << "]" << std::endl
               << "\tPosition initiale du foyer (col, ligne) : " << params.start.column << ", " << params.start.row << std::endl;
 }
+
 int main(int nargs, char* args[]) {
     MPI_Init(&nargs, &args);
 
@@ -201,12 +202,10 @@ int main(int nargs, char* args[]) {
 
     ParamsType params;
     if (rank == 0) {
-        // Parsing des arguments uniquement sur Rank 0
         params = parse_arguments(nargs - 1, &args[1]);
         display_params(params);
     }
 
-    // Broadcast des paramètres à tous les rangs
     MPI_Bcast(&params.length, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Bcast(&params.discretization, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
     MPI_Bcast(params.wind.data(), 2, MPI_DOUBLE, 0, MPI_COMM_WORLD);
@@ -219,38 +218,54 @@ int main(int nargs, char* args[]) {
 
     bool continue_simulation = true;
     int iteration = 0;
-    const int max_iterations = 10000; // Limite arbitraire pour éviter une boucle infinie
+    const int max_iterations = 10000;
+
+    auto total_start_time = std::chrono::high_resolution_clock::now();
 
     while (continue_simulation && iteration < max_iterations) {
+        auto update_start_time = std::chrono::high_resolution_clock::now();
+
         if (rank == 0) {
-            // Rank 0 : affichage et gestion des entrées utilisateur
             std::vector<std::uint8_t> vegetation_map(params.discretization * params.discretization);
             std::vector<std::uint8_t> fire_map(params.discretization * params.discretization);
 
-            // Réception des données des autres rangs
             for (int i = 1; i < size; ++i) {
                 MPI_Recv(vegetation_map.data(), vegetation_map.size(), MPI_BYTE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                 MPI_Recv(fire_map.data(), fire_map.size(), MPI_BYTE, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             }
 
             displayer->update(vegetation_map, fire_map);
-
-            // Gestion de la sortie utilisateur
             if (SDL_PollEvent(&event) && event.type == SDL_QUIT) {
                 continue_simulation = false;
             }
         } else {
-            // Rangs travailleurs : calcul de la simulation
             simu.update();
-
             std::vector<std::uint8_t> vegetation_map = simu.vegetal_map();
             std::vector<std::uint8_t> fire_map = simu.fire_map();
             MPI_Send(vegetation_map.data(), vegetation_map.size(), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
             MPI_Send(fire_map.data(), fire_map.size(), MPI_BYTE, 0, 1, MPI_COMM_WORLD);
+
+            // Affichage du time step
+            if ((simu.time_step() & 31) == 0) {
+                std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
+            }
         }
 
-        MPI_Barrier(MPI_COMM_WORLD); // Synchronisation des processus
+        auto update_end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> update_duration = update_end_time - update_start_time;
+
+        if (rank == 0) {
+            std::cout << "Update duration for iteration " << iteration << ": " << update_duration.count() << " seconds" << std::endl;
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
         iteration++;
+    }
+
+    auto total_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> total_duration = total_end_time - total_start_time;
+    if (rank == 0) {
+        std::cout << "Total simulation time: " << total_duration.count() << " seconds" << std::endl;
     }
 
     MPI_Finalize();
