@@ -191,6 +191,7 @@ Model::update()
     }
 
     m_fire_front = next_front;
+
     #pragma omp parallel for
     for (std::size_t i = 0; i < keys.size(); ++i)
     {
@@ -201,6 +202,7 @@ Model::update()
             m_vegetation_map[key] -= 1;
         }
     }
+
     m_time_step += 1;
     return !m_fire_front.empty();
 }
