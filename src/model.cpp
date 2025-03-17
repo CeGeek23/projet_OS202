@@ -1,8 +1,8 @@
 #include <stdexcept>
 #include <cmath>
 #include <iostream>
+#include <omp.h>
 #include "model.hpp"
-
 
 namespace
 {
@@ -71,79 +71,120 @@ Model::Model( double t_length, unsigned t_discretization, std::array<double,2> t
         alphaSouthNorth = 1. - std::abs(m_wind[1]/t_max_wind);
     }
 }
+
+std::size_t Model::get_index_from_lexicographic_indices(LexicoIndices t_lexico_indices) const
+{
+    return t_lexico_indices.row * m_geometry + t_lexico_indices.column;
+}
+
+Model::LexicoIndices Model::get_lexicographic_from_index(std::size_t t_global_index) const
+{
+    LexicoIndices indices;
+    indices.row = t_global_index / m_geometry;
+    indices.column = t_global_index % m_geometry;
+    return indices;
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 bool 
 Model::update()
 {
     auto next_front = m_fire_front;
-    size_t fire_size = m_fire_front.size();
-    std::cout << "Active fire cells: " << fire_size << std::endl;
-
-    std::vector<std::size_t> fire_keys;
-    fire_keys.reserve(m_fire_front.size());
-    for (const auto& f : m_fire_front) {
-        fire_keys.push_back(f.first);
+    std::vector<std::size_t> keys;
+    keys.reserve(m_fire_front.size());
+    for (const auto& f : m_fire_front)
+    {
+        keys.push_back(f.first);
     }
 
-    if (fire_size < 500) {
-        for (const auto& f : m_fire_front) {
-            LexicoIndices coord = get_lexicographic_from_index(f.first);
-            double power = log_factor(f.second);
+    #pragma omp parallel for
+    for (std::size_t i = 0; i < keys.size(); ++i)
+    {
+        auto key = keys[i];
+        LexicoIndices coord = get_lexicographic_from_index(key);
+        double power = log_factor(m_fire_front[key]);
 
-            if (coord.row < m_geometry-1)
-            {
-                double tirage = pseudo_random(f.first + m_time_step, m_time_step);
-                double green_power = m_vegetation_map[f.first + m_geometry];
-                double correction = power * log_factor(green_power);
-                if (tirage < 2 * alphaSouthNorth * p1 * correction) // Тестуємо збільшене p1
-                {
-                    m_fire_map[f.first + m_geometry] = 255.;
-                    next_front[f.first + m_geometry] = 255.;
-                }
-            }
-
-            if (m_fire_map[f.first] > 1) {
-                m_fire_map[f.first] >>= 1;
-                next_front[f.first] >>= 1;
-            } else {
-                next_front.erase(f.first);
-                std::cout << "Fire extinguished at " << f.first << std::endl;
-            }
-        }
-    }
-    else {
-        #pragma omp parallel for
-        for (size_t idx = 0; idx < fire_keys.size(); ++idx)
+        if (coord.row < m_geometry-1)
         {
-            std::size_t f = fire_keys[idx];
-            LexicoIndices coord = get_lexicographic_from_index(f);
-            double power = log_factor(m_fire_front[f]);
-
-            if (coord.row < m_geometry-1)
+            double tirage = pseudo_random(key+m_time_step, m_time_step);
+            double green_power = m_vegetation_map[key+m_geometry];
+            double correction = power*log_factor(green_power);
+            if (tirage < alphaSouthNorth*p1*correction)
             {
-                double tirage = pseudo_random(f + m_time_step, m_time_step);
-                double green_power = m_vegetation_map[f + m_geometry];
-                double correction = power * log_factor(green_power);
-                if (tirage < 2 * alphaSouthNorth * p1 * correction) // Тестуємо збільшене p1
-                {
-                    #pragma omp critical
-                    {
-                        m_fire_map[f + m_geometry] = 255.;
-                        next_front[f + m_geometry] = 255.;
-                    }
-                }
-            }
-
-            if (m_fire_map[f] > 1) {
-                #pragma omp atomic
-                m_fire_map[f] >>= 1;
-                #pragma omp atomic
-                next_front[f] >>= 1;
-            } else {
                 #pragma omp critical
                 {
-                    next_front.erase(f);
-                    std::cout << "Fire extinguished at " << f << std::endl;
+                    m_fire_map[key + m_geometry] = 255.;
+                    next_front[key + m_geometry] = 255.;
+                }
+            }
+        }
+
+        if (coord.row > 0)
+        {
+            double tirage = pseudo_random(key*13427+m_time_step, m_time_step);
+            double green_power = m_vegetation_map[key - m_geometry];
+            double correction = power*log_factor(green_power);
+            if (tirage < alphaNorthSouth*p1*correction)
+            {
+                #pragma omp critical
+                {
+                    m_fire_map[key - m_geometry] = 255.;
+                    next_front[key - m_geometry] = 255.;
+                }
+            }
+        }
+
+        if (coord.column < m_geometry-1)
+        {
+            double tirage = pseudo_random(key*13427*13427+m_time_step, m_time_step);
+            double green_power = m_vegetation_map[key+1];
+            double correction = power*log_factor(green_power);
+            if (tirage < alphaEastWest*p1*correction)
+            {
+                #pragma omp critical
+                {
+                    m_fire_map[key + 1] = 255.;
+                    next_front[key + 1] = 255.;
+                }
+            }
+        }
+
+        if (coord.column > 0)
+        {
+            double tirage = pseudo_random(key*13427*13427*13427+m_time_step, m_time_step);
+            double green_power = m_vegetation_map[key - 1];
+            double correction = power*log_factor(green_power);
+            if (tirage < alphaWestEast*p1*correction)
+            {
+                #pragma omp critical
+                {
+                    m_fire_map[key - 1] = 255.;
+                    next_front[key - 1] = 255.;
+                }
+            }
+        }
+
+        if (m_fire_front[key] == 255)
+        {
+            double tirage = pseudo_random(key * 52513 + m_time_step, m_time_step);
+            if (tirage < p2)
+            {
+                #pragma omp critical
+                {
+                    m_fire_map[key] >>= 1;
+                    next_front[key] >>= 1;
+                }
+            }
+        }
+        else
+        {
+            #pragma omp critical
+            {
+                m_fire_map[key] >>= 1;
+                next_front[key] >>= 1;
+                if (next_front[key] == 0)
+                {
+                    next_front.erase(key);
                 }
             }
         }
@@ -151,34 +192,17 @@ Model::update()
 
     m_fire_front = next_front;
 
-    std::cout << "Updating fire front: " << next_front.size() << " active cells" << std::endl;
-
-    #pragma omp parallel for if(fire_size >= 500)
-    for (size_t i = 0; i < fire_keys.size(); ++i)
+    #pragma omp parallel for
+    for (std::size_t i = 0; i < keys.size(); ++i)
     {
-        std::size_t f = fire_keys[i];
-        if (m_vegetation_map[f] > 0)
+        auto key = keys[i];
+        if (m_vegetation_map[key] > 0)
         {
             #pragma omp atomic
-            m_vegetation_map[f] -= 1;
+            m_vegetation_map[key] -= 1;
         }
     }
 
     m_time_step += 1;
     return !m_fire_front.empty();
-}
-// ====================================================================================================================
-std::size_t   
-Model::get_index_from_lexicographic_indices( LexicoIndices t_lexico_indices  ) const
-{
-    return t_lexico_indices.row*this->geometry() + t_lexico_indices.column;
-}
-// --------------------------------------------------------------------------------------------------------------------
-auto 
-Model::get_lexicographic_from_index( std::size_t t_global_index ) const -> LexicoIndices
-{
-    LexicoIndices ind_coords;
-    ind_coords.row    = t_global_index/this->geometry();
-    ind_coords.column = t_global_index%this->geometry();
-    return ind_coords;
 }
