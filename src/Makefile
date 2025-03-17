@@ -3,7 +3,7 @@ include Make_linux.inc
 CXX = mpic++  # On rajoute mpic++ pour compiler avec MPI
 CXXFLAGS = -std=c++17
 ifdef DEBUG
-CXXFLAGS += -g -O0 -Wall -fbounds-check -pedantic -D_GLIBCXX_DEBUG
+CXXFLAGS += -g -O0 -Wall -fbounds-check -pedantic -D_GLIBCXX_DEBUGz
 CXXFLAGS2 = CXXFLAGS
 else
 CXXFLAGS2 = ${CXXFLAGS} -O2 -march=native -Wall 
