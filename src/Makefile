@@ -1,8 +1,8 @@
 include Make_linux.inc
 #include Make_msys2.inc
 #include Make_osx.inc
-
-CXXFLAGS = -std=c++17 -Wall
+CXX = mpicxx
+CXXFLAGS = -std=c++17 -Wall -fopenmp
 ifdef DEBUG
 CXXFLAGS += -g -O0 -fbounds-check -pedantic -D_GLIBCXX_DEBUG -fsanitize=address
 else
@@ -22,7 +22,7 @@ clean:
 	$(CXX) $(CXXFLAGS) -MMD -c $< -o $@
 
 simulation.exe : display.o model.o simulation.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIB)	
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIB) -lmpi
 
 help:
 	@echo "Available targets : "

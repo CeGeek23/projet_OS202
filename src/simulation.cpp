@@ -4,7 +4,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
-#include <omp.h>
+#include <mpi.h>
 
 #include "model.hpp"
 #include "display.hpp"
@@ -193,40 +193,81 @@ void display_params(ParamsType const& params)
               << "\tPosition initiale du foyer (col, ligne) : " << params.start.column << ", " << params.start.row << std::endl;
 }
 
-int main( int nargs, char* args[] )
-{
-    auto params = parse_arguments(nargs-1, &args[1]);
-    display_params(params);
-    if (!check_params(params)) return EXIT_FAILURE;
+int main(int nargs, char* args[]) {
+    MPI_Init(&nargs, &args);
 
-    auto displayer = Displayer::init_instance( params.discretization, params.discretization );
-    auto simu = Model( params.length, params.discretization, params.wind,
-                       params.start);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    ParamsType params;
+    if (rank == 0) {
+        params = parse_arguments(nargs - 1, &args[1]);
+        display_params(params);
+    }
+
+    MPI_Bcast(&params.length, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&params.discretization, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+    MPI_Bcast(params.wind.data(), 2, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&params.start.column, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&params.start.row, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+
+    auto displayer = (rank == 0) ? Displayer::init_instance(params.discretization, params.discretization) : nullptr;
+    auto simu = Model(params.length, params.discretization, params.wind, params.start);
     SDL_Event event;
 
-    std::thread display_thread([&]() {
-        while (true) {
-            displayer->update( simu.vegetal_map(), simu.fire_map() );
-            if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
-                break;
-            std::this_thread::sleep_for(0.1s);
+    bool continue_simulation = true;
+    int iteration = 0;
+    const int max_iterations = 10000;
+
+    auto total_start_time = std::chrono::high_resolution_clock::now();
+
+    while (continue_simulation && iteration < max_iterations) {
+        auto update_start_time = std::chrono::high_resolution_clock::now();
+
+        if (rank == 0) {
+            std::vector<std::uint8_t> vegetation_map(params.discretization * params.discretization);
+            std::vector<std::uint8_t> fire_map(params.discretization * params.discretization);
+
+            for (int i = 1; i < size; ++i) {
+                MPI_Recv(vegetation_map.data(), vegetation_map.size(), MPI_BYTE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(fire_map.data(), fire_map.size(), MPI_BYTE, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+
+            displayer->update(vegetation_map, fire_map);
+            if (SDL_PollEvent(&event) && event.type == SDL_QUIT) {
+                continue_simulation = false;
+            }
+        } else {
+            simu.update();
+            std::vector<std::uint8_t> vegetation_map = simu.vegetal_map();
+            std::vector<std::uint8_t> fire_map = simu.fire_map();
+            MPI_Send(vegetation_map.data(), vegetation_map.size(), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+            MPI_Send(fire_map.data(), fire_map.size(), MPI_BYTE, 0, 1, MPI_COMM_WORLD);
+
+            // Affichage du time step
+            if ((simu.time_step() & 31) == 0) {
+                std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
+            }
         }
-    });
 
-    double start_time = omp_get_wtime();
-    while (simu.update())
-    {
-        if ((simu.time_step() & 31) == 0) 
-            std::cout << "Time step " << simu.time_step() << "\n===============" << std::endl;
-        displayer->update( simu.vegetal_map(), simu.fire_map() );
-        if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
-            break;
-        //std::this_thread::sleep_for(0.1s);
+        auto update_end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> update_duration = update_end_time - update_start_time;
+
+        if (rank == 0) {
+            std::cout << "Update duration for iteration " << iteration << ": " << update_duration.count() << " seconds" << std::endl;
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        iteration++;
     }
-    double end_time = omp_get_wtime();
-    double elapsed_time = end_time - start_time;
-    std::cout << "Simulation terminée en " << elapsed_time << " secondes" << std::endl;
 
-    display_thread.join();
+    auto total_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> total_duration = total_end_time - total_start_time;
+    if (rank == 0) {
+        std::cout << "Total simulation time: " << total_duration.count() << " seconds" << std::endl;
+    }
+
+    MPI_Finalize();
     return EXIT_SUCCESS;
 }
